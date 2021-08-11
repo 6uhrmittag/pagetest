@@ -31,6 +31,12 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"golang.org/x/net/html/charset"
+
+    // Logging with httptraceutils
+    _ "log"
+	_ "github.com/tcnksm/go-httptraceutils"
+    //https://github.com/henvic/httpretty
+	_ "github.com/henvic/httpretty"
 )
 
 func main() {
@@ -86,18 +92,23 @@ func run(args runArgs) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(twr, "url\tcode\tDNS lookup\tTCP connect\tTLS handshake\tfirst byte\t")
+	fmt.Fprintln(twr, "url\tcode\tDNS lookup\tTCP connect\tTLS handshake\tfirst byte\tContent-Length\t")
 	var mu sync.Mutex // guards twr writes
-	report := func(s string, code int, ts *timings) {
+	report := func(s string, code int, contentlength string, ts *timings) {
 		mu.Lock()
 		defer mu.Unlock()
-		fmt.Fprintf(twr, "%s\t%d\t%v\t%v\t%v\t%v\t\n",
+        if contentlength == "" {
+    		contentlength = "-"
+        }
+		fmt.Fprintf(twr, "%s\t%d\t%v\t%v\t%v\t%v\t%v\t\n",
 			s, code, ts.Lookup.Round(time.Millisecond),
 			ts.Connect.Round(time.Millisecond),
 			ts.Handshake.Round(time.Millisecond),
-			ts.FirstByte.Round(time.Millisecond))
+			ts.FirstByte.Round(time.Millisecond),
+            contentlength,
+            )
 	}
-	report(args.URL, resp.StatusCode, ts)
+	report(args.URL, resp.StatusCode, resp.Header.Get("Content-Length"), ts)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %q", resp.Status)
@@ -152,7 +163,9 @@ func run(args runArgs) error {
 			defer wg.Done()
 			for s := range ch {
 				ts, err := func(s string) (*timings, error) {
-					ts, resp, err := doRequest(ctx, http.MethodHead, s)
+					// Changed to GET for testing of Content-Lengt
+					ts, resp, err := doRequest(ctx, http.MethodGet, s)
+					//ts, resp, err := doRequest(ctx, http.MethodHead, s)
 					if err != nil {
 						return nil, err
 					}
@@ -161,7 +174,15 @@ func run(args runArgs) error {
 				}(s)
 				switch err {
 				case nil:
-					report(s, resp.StatusCode, ts)
+                    report(s, resp.StatusCode, resp.Header.Get("Content-Length"), ts)
+                    // pringt all headers line by line
+                    //fmt.Print("----------------------------------------")
+                    //for k, v := range resp.Header {
+                    //    fmt.Print(k)
+                    //    fmt.Print(" : ")
+                    //    fmt.Println(v)
+                    //fmt.Print("----------------------------------------")
+                    //}
 				default:
 					atomic.AddUint32(&errCnt, 1)
 					fmt.Fprintf(stderr, "%s\t%v\n", s, err)
@@ -197,10 +218,52 @@ func doRequest(ctx context.Context, method, url string) (*timings, *http.Respons
 		TLSHandshakeStart:    func() { tlsStart = time.Now() },
 		TLSHandshakeDone:     func(_ tls.ConnectionState, _ error) { tlsDone = time.Now() },
 	}
+	// Logging with httptraceutils
+	//ctx = httptraceutils.WithClientTrace(context.Background())
 	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
 	req.Header.Set("User-Agent", userAgent)
+
+    // logger https://github.com/henvic/httpretty
+    //logger := &httpretty.Logger{
+	//	Time:           false,
+	//	TLS:            false,
+	//	RequestHeader:  false,
+	//	RequestBody:    false,
+	//	ResponseHeader: true,
+	//	ResponseBody:   false,
+	//	Colors:         true, // erase line if you don't like colors
+	//	Formatters:     []httpretty.Formatter{&httpretty.JSONFormatter{}},
+	//}
+	//logger.SkipHeader([]string{
+	//	"X-Content-Type-Options",
+	//	"content-type",
+	//	"Expires",
+	//})
+    //func filteredURIs(req *http.Header) (bool, error) {
+    //    path := req.URL.Path
+    //    if path == "/filtered" {
+    //        return true, nil
+    //    }
+    //    if path == "/unfiltered" {
+    //        return false, nil
+    //    }
+    //    return false, errors.New("filter error triggered")
+    //}
+	//logger.SetFilter(filteredURIs)
+
+	//logger.SetFilter(filteredURIs)
+	//logger.SetBodyFilter(func(h http.Header) (skip bool, err error) {
+	//	// filter anyway, but print soft error saying something went wrong during the filtering.
+	//	return true, errors.New("incomplete implementation")
+	//})
+
+    // logger https://github.com/henvic/httpretty
+	//http.DefaultClient.Transport = logger.RoundTripper(http.DefaultClient.Transport)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+	    // Logging with httptraceutils
+	    //log.Fatal(err)
+	    //fmt.Fprintf(os.Stderr, "%+v\n", err)
 		return nil, nil, err
 	}
 	ts := &timings{
